@@ -827,6 +827,7 @@ async function initSupabaseAuth(){
 }
 
 function applySessionToState(session){
+  const wasAuthenticated = S.authenticated;
   if(session && session.user){
     S.authenticated = true;
     S.currentUser = { id: session.user.id, email: session.user.email };
@@ -837,6 +838,52 @@ function applySessionToState(session){
     S.currentUser = null;
     S.currentUserId = null;
   }
+  // Assim que uma sessão real é confirmada — login novo OU sessão restaurada
+  // ao recarregar a página — carrega os dados reais do Supabase. Só dispara
+  // na transição de "não autenticado" para "autenticado" (nunca de novo em
+  // eventos subsequentes do listener, como um simples refresh de token, o
+  // que evitaria recarregar as 27 tabelas à toa). Nunca lê usando o
+  // DEV_OWNER_ID — só a identidade real é usada aqui.
+  if(S.dataBackend==='supabase' && S.authenticated && !wasAuthenticated){
+    loadAllFromSupabase();
+  }
+}
+
+async function loadAllFromSupabase(){
+  // Carga inicial das 27 tabelas a partir do Supabase real, respeitando o
+  // RLS (owner_id = auth.uid()) através da sessão já autenticada — nenhum
+  // filtro artificial é adicionado aqui; o próprio banco já só devolve o
+  // que pertence ao usuário logado.
+  const client = getSupabaseClient();
+  if(!client){
+    console.warn('[Supabase] loadAllFromSupabase(): cliente não configurado, nada a carregar.');
+    return;
+  }
+  if(!S.authenticated || !S.currentUserId){
+    // Nunca usa o DEV_OWNER_ID para ler dados reais — sem sessão de verdade,
+    // não há o que buscar (o Auth Gate já está sendo mostrado nessa hora).
+    console.warn('[Supabase] loadAllFromSupabase(): chamada sem sessão autenticada — abortando.');
+    return;
+  }
+  const cols = ['clients','leads','projects','tasks','activity','sites','diary','issues','suppliers','files','transactions','events','notif_reads','stages','checklist_items','stage_photos','stage_files','project_templates','template_stages','template_checklist_items','template_files','time_entries','activity_types','lead_stages','site_templates','template_site_checklist_items','app_meta'];
+  const results = await Promise.all(cols.map(async col => {
+    try{
+      const { data, error } = await client.from(col).select('*');
+      if(error) throw error;
+      return { col, rows: (data||[]).map(row => fromSupabaseRow(col, row)) };
+    }catch(e){
+      // Nunca esconde o erro — registra exatamente qual tabela falhou e por
+      // quê, e NÃO apaga o que já estava carregado das outras tabelas.
+      console.error(`[Supabase] Falha ao carregar a tabela "${col}":`, e);
+      return { col, error: e };
+    }
+  }));
+  results.forEach(r => {
+    if(r.error) return; // preserva o conteúdo anterior de S[r.col] nesse caso
+    S[r.col] = r.rows;
+  });
+  S.ready = true;
+  render();
 }
 
 async function submitLogin(){
@@ -6137,6 +6184,7 @@ window.getSupabaseClient = getSupabaseClient; window.__setSupabaseClientForTesti
 window.toSupabaseRow = toSupabaseRow; window.fromSupabaseRow = fromSupabaseRow;
 window.dbAddSupabase = dbAddSupabase; window.dbSetSupabase = dbSetSupabase; window.dbDeleteSupabase = dbDeleteSupabase;
 window.initSupabaseAuth = initSupabaseAuth; window.applySessionToState = applySessionToState;
+window.loadAllFromSupabase = loadAllFromSupabase;
 window.submitLogin = submitLogin; window.logout = logout;
 window.openProjectWorkspace = openProjectWorkspace; window.setProjectWorkspaceTab = setProjectWorkspaceTab; window.backToProjects = backToProjects;
 window.openStageInline = openStageInline; window.backToStagesList = backToStagesList; window.setStageSubTab = setStageSubTab; window.goToAdjacentStage = goToAdjacentStage;
@@ -6168,8 +6216,17 @@ window.quickSetChecklistDueDate = quickSetChecklistDueDate; window.saveQuickDueD
 window.handleSearchResultClick = handleSearchResultClick; window.computeNotifications = computeNotifications; window.isNotifRead = isNotifRead;
 
 render();
-initDb();
-initSupabaseAuth();
+// Em modo Supabase, o banco Claude não participa do boot de produção —
+// initSupabaseAuth() cuida sozinho de: sessão -> (Auth Gate OU
+// loadAllFromSupabase()) -> S.ready -> render(). O modo Claude continua
+// disponível (initDb()/subscribeAll()) para testes automatizados e como
+// fallback local, mas só entra em ação quando dataBackend é 'claude'.
+if(S.dataBackend==='supabase'){
+  initSupabaseAuth();
+} else {
+  initDb();
+  initSupabaseAuth();
+}
 </script>
 </body>
 </html>
