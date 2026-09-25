@@ -684,13 +684,19 @@ const S = {
   calendarOffset:0, agendaViewMode:'mes',
   drawer:null, // {type,id}
   db:null, dbAvailable:false,
-  // ---- Infraestrutura de migração para Supabase (Etapa 2 — só preparação) ----
-  // Enquanto 'claude', o comportamento do sistema é 100% o mesmo de sempre.
-  // Nenhuma função de leitura/escrita usa isso ainda — é só o "interruptor"
-  // que futuramente vai decidir para onde dbAdd/dbSet/dbDelete/subscribeAll
-  // mandam as operações. Trocar esse valor sozinho não muda nada no sistema
-  // até essas funções serem reescritas numa etapa futura e aprovada à parte.
-  dataBackend:'claude',
+  // ---- Backend de dados (Etapa 2E — Supabase como padrão de produção) ----
+  // 'supabase': o app inicializa a sessão do Supabase Auth no boot; sem
+  // sessão, mostra o Auth Gate (tela de login) antes de qualquer coisa;
+  // dbAdd/dbSet/dbDelete passam a gravar no banco real, com owner_id vindo
+  // do usuário autenticado. 'claude' continua existindo como modo local/
+  // mock, usado pelos testes automatizados e como fallback manual se
+  // precisarmos isolar um problema voltando ao banco de desenvolvimento.
+  // window.__FORCE_CLAUDE_BACKEND_FOR_TESTS__ existe só para a bateria de
+  // testes automatizados: setado ANTES do script do app rodar, garante que
+  // o boot/seed (que já dispara dbAdd()) use o caminho local desde a
+  // primeira chamada — nunca é definido durante o uso normal da aplicação,
+  // então não afeta o padrão de produção em nada.
+  dataBackend:(typeof window!=='undefined' && window.__FORCE_CLAUDE_BACKEND_FOR_TESTS__)? 'claude' : 'supabase',
   // ---- Identidade/sessão do Supabase Auth (Etapa 2C) ----
   // Único lugar do sistema que sabe "quem está logado". Atualizado só por
   // applySessionToState(), nunca diretamente por outro código.
