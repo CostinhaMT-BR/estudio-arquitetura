@@ -4431,7 +4431,7 @@ function openEventForm(id, presetDate, presetProjectId){
   `);
 }
 async function saveEvent(id){
-  const data = { title: val('f_title'), type: val('f_type'), date: val('f_date'), time: val('f_time'), clientId: val('f_client')||null, projectId: val('f_project')||null, notes: val('f_notes') };
+  const data = { title: val('f_title'), type: val('f_type'), date: val('f_date')||null, time: val('f_time')||null, clientId: val('f_client')||null, projectId: val('f_project')||null, notes: val('f_notes') };
   if(!data.title){ toast('Informe o título do evento.'); return; }
   if(id){ await dbSet('events', id, data); await logActivity(`Evento "${data.title}" atualizado.`,'agenda'); }
   else { await dbAdd('events', data); await logActivity(`Novo evento na agenda: ${data.title}.`,'agenda'); }
@@ -5539,7 +5539,7 @@ function openProjectForm(id){
 async function saveProject(id){
   const data = {
     name: val('f_name'), clientId: val('f_client')||null, type: val('f_type'), address: val('f_address'),
-    area: val('f_area'), responsible: val('f_resp'), startDate: val('f_start'), dueDate: val('f_due'),
+    area: val('f_area'), responsible: val('f_resp'), startDate: val('f_start')||null, dueDate: val('f_due')||null,
     value: Number(val('f_value'))||0, status: val('f_status'),
   };
   if(!data.name){ toast('Informe o nome do projeto.'); return; }
@@ -5723,7 +5723,7 @@ async function saveTask(id, leadId, siteId){
     stageId: (leadId || siteId)? null : (val('f_stage')||null),
     leadId: leadId || (existing? existing.leadId||null : null),
     siteId: siteId || (existing? existing.siteId||null : null),
-    responsible: val('f_resp'), priority: val('f_priority'), dueDate: val('f_due'), status: val('f_status'),
+    responsible: val('f_resp'), priority: val('f_priority'), dueDate: val('f_due')||null, status: val('f_status'),
     notes: val('f_notes'),
     activityType,
   };
@@ -5766,7 +5766,7 @@ function openSiteForm(id){
 async function saveSite(id){
   const data = {
     name: val('f_name'), clientId: val('f_client')||null, projectId: val('f_project')||null,
-    construction: val('f_construction'), responsible: val('f_resp'), startDate: val('f_start'), dueDate: val('f_due'),
+    construction: val('f_construction'), responsible: val('f_resp'), startDate: val('f_start')||null, dueDate: val('f_due')||null,
     currentStage: val('f_stage'), status: val('f_status'), progress: Number(val('f_progress'))||0,
   };
   if(!data.name){ toast('Informe o nome da obra.'); return; }
@@ -5810,7 +5810,7 @@ function openIssueForm(id, presetSiteId){
 async function saveIssue(id){
   const data = {
     description: val('f_desc'), siteId: val('f_site')||null, supplierId: val('f_supplier')||null,
-    responsible: val('f_resp'), dueDate: val('f_due'), priority: val('f_priority'), status: val('f_status'),
+    responsible: val('f_resp'), dueDate: val('f_due')||null, priority: val('f_priority'), status: val('f_status'),
   };
   if(!data.description){ toast('Descreva a pendência.'); return; }
   if(!data.siteId){ toast('Selecione a obra.'); return; }
@@ -5880,7 +5880,7 @@ function openDiaryForm(id, presetSiteId){
   `);
 }
 async function saveDiary(id){
-  const data = { siteId: val('f_site')||null, date: val('f_date'), visitors: val('f_visitors'), activities: val('f_activities'), problems: val('f_problems'), decisions: val('f_decisions') };
+  const data = { siteId: val('f_site')||null, date: val('f_date')||null, visitors: val('f_visitors'), activities: val('f_activities'), problems: val('f_problems'), decisions: val('f_decisions') };
   if(!data.siteId){ toast('Selecione a obra.'); return; }
   if(id){ await dbSet('diary', id, data); await logActivity(`Registro de diário atualizado — ${siteName(data.siteId)}.`,'construction'); }
   else { await dbAdd('diary', data); await logActivity(`Novo registro de diário — ${siteName(data.siteId)}.`,'construction'); }
@@ -5953,7 +5953,7 @@ async function saveTxn(type, id){
   const doneVal = isReceita? 'recebido':'pago';
   const data = {
     type, description: val('f_desc'), projectId: val('f_project')||null, category: val('f_category'),
-    value: Number(val('f_value'))||0, dueDate: val('f_due'), status,
+    value: Number(val('f_value'))||0, dueDate: val('f_due')||null, status,
     paymentDate: status===doneVal? (id? (S.transactions.find(x=>x.id===id)||{}).paymentDate||todayISO() : todayISO()) : null,
   };
   if(isReceita) data.clientId = val('f_client')||null; else data.supplierId = val('f_supplier')||null;
