@@ -92,6 +92,14 @@ button{font-family:inherit;}
   font-size:11px;color:var(--ink-faint);padding:0 10px 6px;
   font-weight:600;letter-spacing:.04em;
 }
+.nav-group-label-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;}
+.nav-collapse-caret{font-size:12px;opacity:.7;}
+.nav-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.nav-item-right{margin-left:auto;display:flex;align-items:center;gap:6px;flex:0 0 auto;}
+.nav-fav{font-size:14px;color:var(--ink-faint);cursor:pointer;flex:0 0 auto;line-height:1;padding:2px;}
+.nav-fav:hover{color:var(--warning);}
+.nav-fav.is-fav{color:var(--warning);}
+.nav-empty-hint{font-size:12px;color:var(--ink-faint);padding:2px 10px 6px;margin:0;}
 .nav-item{
   display:flex;align-items:center;gap:10px;padding:8px 10px;
   border-radius:var(--radius-s);cursor:pointer;color:var(--ink-soft);
@@ -563,11 +571,15 @@ tbody tr:last-child td{border-bottom:none;}
   .conn-badge{padding:5px;}
 }
 .menu-toggle{display:none;}
-.login-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper);padding:20px;}
+.login-screen{min-height:100vh;width:100%;display:flex;align-items:center;justify-content:center;background:var(--paper);padding:20px;box-sizing:border-box;}
 .login-card{width:100%;max-width:360px;background:var(--paper-raised);border:1px solid var(--line);border-radius:var(--radius-l);box-shadow:var(--shadow-pop);padding:36px 32px;text-align:center;}
 .login-card .brand-mark{width:44px;height:44px;border-radius:var(--radius-m);background:var(--ink);color:var(--paper);display:flex;align-items:center;justify-content:center;margin:0 auto;}
 .login-card .brand-mark svg{width:22px;height:22px;}
 .login-card .form-field{text-align:left;margin-top:14px;}
+.login-remember{display:flex;align-items:center;gap:7px;margin-top:12px;text-align:left;font-size:12.5px;color:var(--ink-soft);}
+.login-remember input{accent-color:var(--accent);width:14px;height:14px;}
+.dash-group{margin-bottom:28px;}
+.dash-group-title{font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 12px;}
 .login-error{background:var(--danger-soft);color:var(--danger);border-radius:var(--radius-s);padding:9px 12px;font-size:12.5px;margin-top:16px;text-align:left;}
 </style>
 <!-- Etapa 2A: biblioteca oficial do cliente Supabase (build UMD, sem bundler,
@@ -701,6 +713,7 @@ const S = {
   // Único lugar do sistema que sabe "quem está logado". Atualizado só por
   // applySessionToState(), nunca diretamente por outro código.
   authenticated:false, currentUser:null, currentUserId:null, authLoading:true, authError:null,
+  tasksCompletedExpanded:false,
 };
 
 function uid(prefix){ return prefix+'_'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4); }
@@ -735,14 +748,37 @@ function toast(msg){
 // lugar para buscar esse valor quando a hora chegar, em vez de espalhar o
 // UUID pelo código.
 const DEV_OWNER_ID = '11111111-1111-1111-1111-111111111111';
-function getCurrentOwnerId(){
-  // Fonte única de verdade sobre "quem está fazendo esta operação":
-  // - Se existe uma sessão real do Supabase Auth (S.authenticated), usa o
-  //   UUID real do usuário logado — é ele que vale contra o banco de verdade,
-  //   porque é o mesmo UUID que o próprio Postgres calcula via auth.uid().
-  // - Sem sessão real, cai no UUID fixo de desenvolvimento — só serve para
-  //   testes/simulação local (nunca é aceito pelas políticas de RLS do banco
-  //   real, como já diagnosticamos).
+async function getCurrentOwnerId(){
+  // Fonte única de verdade sobre "quem está fazendo esta operação". Antes de
+  // qualquer escrita real contra o Supabase, confirma a identidade DIRETO com
+  // o servidor (client.auth.getUser()) em vez de confiar cegamente no
+  // S.currentUserId em cache — isso garante que o owner_id que enviamos é
+  // exatamente o mesmo auth.uid() que o Postgres vai calcular no RLS, mesmo
+  // que a sessão tenha sido renovada silenciosamente (refresh de token) desde
+  // o último evento que atualizou nosso estado local. Sem essa confirmação,
+  // um valor em cache desatualizado pode divergir do auth.uid() real e a
+  // política de RLS (owner_id = auth.uid()) rejeita a escrita.
+  if(S.dataBackend==='supabase'){
+    const client = getSupabaseClient();
+    if(client){
+      try{
+        const { data, error } = await client.auth.getUser();
+        if(!error && data && data.user){
+          if(S.currentUserId !== data.user.id){
+            S.currentUserId = data.user.id;
+            S.currentUser = { id: data.user.id, email: data.user.email };
+          }
+          S.authenticated = true;
+          return data.user.id;
+        }
+      }catch(e){
+        console.warn('[Auth] getCurrentOwnerId(): falha ao confirmar usuário com o servidor', e);
+      }
+    }
+  }
+  // Sem sessão real confirmável, cai no UUID fixo de desenvolvimento — só
+  // serve para testes/simulação local (nunca é aceito pelas políticas de RLS
+  // do banco real).
   if(S.authenticated && S.currentUserId) return S.currentUserId;
   return DEV_OWNER_ID;
 }
@@ -913,6 +949,14 @@ async function submitLogin(){
       }
       throw error;
     }
+    // "Lembrar meu usuário": guarda SOMENTE o e-mail — a senha nunca é salva
+    // em lugar nenhum. Isso não interfere na sessão real do Supabase Auth
+    // (que já persiste sozinha, via getSession() no boot).
+    try{
+      const remember = document.getElementById('f_login_remember');
+      if(remember && remember.checked) localStorage.setItem('estudio:remembered_email', email);
+      else localStorage.removeItem('estudio:remembered_email');
+    }catch(e){}
     applySessionToState(data.session);
   }catch(e){
     if(!S.authError) S.authError = 'Não foi possível entrar. Tente novamente.';
@@ -1564,7 +1608,7 @@ async function dbAddSupabase(col, data){
     render();
     throw new Error('Supabase client not configured');
   }
-  const ownerId = getCurrentOwnerId();
+  const ownerId = await getCurrentOwnerId();
   const row = { ...toSupabaseRow(col, data), owner_id: ownerId };
   try{
     const { data: inserted, error } = await client.from(col).insert(row).select().single();
@@ -1577,7 +1621,8 @@ async function dbAddSupabase(col, data){
   }catch(e){
     S[col] = S[col].filter(x=>x.id!==tempId);
     render();
-    toast('Não foi possível salvar no Supabase — verifique sua conexão e tente novamente.');
+    console.error('[Supabase] Falha ao inserir:', e);
+    toast(e && e.message ? `Não foi possível salvar: ${e.message}` : 'Não foi possível salvar no Supabase — verifique sua conexão.');
     throw e;
   }
 }
@@ -1666,7 +1711,7 @@ async function dbSetSupabase(col, id, data, opts){
     render();
     throw new Error('Supabase client not configured');
   }
-  const ownerId = getCurrentOwnerId();
+  const ownerId = await getCurrentOwnerId();
   // owner_id NUNCA entra no payload de UPDATE — só é usado como filtro, para
   // garantir que a escrita só alcança um registro que já é do mesmo dono.
   const row = toSupabaseRow(col, data);
@@ -1710,7 +1755,8 @@ async function dbSetSupabase(col, id, data, opts){
       S[col] = S[col].filter(x=>x.id!==id);
     }
     render();
-    toast('Não foi possível salvar a alteração no Supabase — verifique sua conexão.');
+    console.error('[Supabase] Falha ao atualizar:', e);
+    toast(e && e.message ? `Não foi possível salvar a alteração: ${e.message}` : 'Não foi possível salvar a alteração no Supabase — verifique sua conexão.');
     throw e;
   }
 }
@@ -1744,7 +1790,7 @@ async function dbDeleteSupabase(col, id){
     if(removed){ S[col].unshift(removed); render(); }
     throw new Error('Supabase client not configured');
   }
-  const ownerId = getCurrentOwnerId();
+  const ownerId = await getCurrentOwnerId();
   try{
     // Só apaga quando id E owner_id batem — nunca alcança registro de outro dono.
     const { error, count } = await client.from(col)
@@ -1757,7 +1803,8 @@ async function dbDeleteSupabase(col, id){
     }
   }catch(e){
     if(removed){ S[col].unshift(removed); render(); }
-    toast('Não foi possível excluir no Supabase — verifique sua conexão.');
+    console.error('[Supabase] Falha ao excluir:', e);
+    toast(e && e.message ? `Não foi possível excluir: ${e.message}` : 'Não foi possível excluir no Supabase — verifique sua conexão.');
     throw e;
   }
 }
@@ -2346,15 +2393,20 @@ function renderAuthGate(){
   if(S.authLoading){
     return `<div class="login-screen"><div class="login-card"><div class="brand-mark">${ICONS.logo}</div><p class="mini-tag" style="margin-top:16px;">Verificando sessão…</p></div></div>`;
   }
+  let rememberedEmail = '';
+  try{ rememberedEmail = localStorage.getItem('estudio:remembered_email') || ''; }catch(e){}
   return `<div class="login-screen">
     <div class="login-card">
       <div class="brand-mark">${ICONS.logo}</div>
       <h1 class="serif" style="font-size:21px;margin:14px 0 2px;">Estúdio</h1>
       <p class="mini-tag" style="margin:0 0 4px;">Entre com sua conta para continuar.</p>
       ${S.authError? `<div class="login-error">${escapeHtml(S.authError)}</div>` : ''}
-      <div class="form-field full"><label>E-mail</label><input id="f_login_email" type="email" autocomplete="username" placeholder="voce@escritorio.com"></div>
-      <div class="form-field full"><label>Senha</label><input id="f_login_password" type="password" autocomplete="current-password"></div>
-      <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:16px;" data-act="submitLogin" ${S.authLoading?'disabled':''}>${S.authLoading?'Entrando…':'Entrar'}</button>
+      <form id="loginFormEl" autocomplete="on">
+        <div class="form-field full"><label for="f_login_email">E-mail</label><input id="f_login_email" name="email" type="email" autocomplete="username" placeholder="voce@escritorio.com" value="${escapeHtml(rememberedEmail)}"></div>
+        <div class="form-field full"><label for="f_login_password">Senha</label><input id="f_login_password" name="password" type="password" autocomplete="current-password"></div>
+        <label class="login-remember"><input type="checkbox" id="f_login_remember" ${rememberedEmail?'checked':''}> Lembrar meu usuário</label>
+        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;margin-top:16px;" ${S.authLoading?'disabled':''}>${S.authLoading?'Entrando…':'Entrar'}</button>
+      </form>
     </div>
   </div>`;
 }
@@ -2428,27 +2480,70 @@ function render(){
   }
 }
 
+function navCollapsedState(){
+  try{ return JSON.parse(localStorage.getItem('estudio:nav_collapsed')||'{}'); }catch(e){ return {}; }
+}
+function toggleNavGroup(group){
+  const state = navCollapsedState();
+  state[group] = !state[group];
+  try{ localStorage.setItem('estudio:nav_collapsed', JSON.stringify(state)); }catch(e){}
+  rerenderCurrentView();
+}
+function favoritesKey(){
+  return 'estudio:favorites:' + (S.currentUserId || 'local');
+}
+function getFavorites(){
+  try{ return JSON.parse(localStorage.getItem(favoritesKey())||'[]'); }catch(e){ return []; }
+}
+function isFavoriteNavItem(id){ return getFavorites().includes(id); }
+function toggleFavoriteNavItem(id){
+  let favs = getFavorites();
+  favs = favs.includes(id) ? favs.filter(x=>x!==id) : [...favs, id];
+  try{ localStorage.setItem(favoritesKey(), JSON.stringify(favs)); }catch(e){}
+  rerenderCurrentView();
+}
+function navItemCount(it){
+  if(it.id==='tarefas') return taskLikeItems().filter(t=>t.status!=='concluido').length;
+  if(it.id==='leads') return S.leads.filter(l=>{ const st=S.lead_stages.find(x=>x.id===l.stage); return !(st&&(st.isWon||st.isLost)); }).length;
+  if(it.id==='clientes') return S.clients.length;
+  if(it.id==='projetos') return S.projects.filter(p=>p.status!=='concluido').length;
+  if(it.id==='obras') return S.sites.filter(s=>s.status!=='concluida').length;
+  if(it.id==='pendencias') return S.issues.filter(i=>i.status!=='concluido').length;
+  if(it.id==='notificacoes') return computeNotifications().filter(n=>!isNotifRead(n.id)).length;
+  return '';
+}
+function renderNavItem(it){
+  const built = BUILT_VIEWS.has(it.id);
+  const count = navItemCount(it);
+  const fav = isFavoriteNavItem(it.id);
+  return `<div class="nav-item ${S.view===it.id?'active':''}" data-act="setView" data-args='${JSON.stringify([it.id])}'>
+    ${ICONS[it.icon]}<span class="nav-item-label">${it.label}</span>
+    <span class="nav-item-right">
+      ${!built ? '<span class="soon-badge">em breve</span>' : (count!==''? `<span class="count">${count}</span>` : '')}
+      <span class="nav-fav ${fav?'is-fav':''}" data-act="toggleFavoriteNavItem" data-args='${JSON.stringify([it.id])}' title="${fav?'Remover dos favoritos':'Adicionar aos favoritos'}">${fav?'★':'☆'}</span>
+    </span>
+  </div>`;
+}
 function renderNav(){
-  return NAV.map(g=>`
+  const collapsed = navCollapsedState();
+  const favIds = getFavorites();
+  const favItems = favIds.map(id => NAV.flatMap(g=>g.items).find(it=>it.id===id)).filter(Boolean);
+  const favBlock = `
     <div class="nav-group">
-      <div class="nav-group-label">${g.group.toUpperCase()}</div>
-      ${g.items.map(it=>{
-        const built = BUILT_VIEWS.has(it.id);
-        let count = '';
-        if(it.id==='tarefas') count = taskLikeItems().filter(t=>t.status!=='concluido').length;
-        if(it.id==='leads') count = S.leads.filter(l=>{ const st=S.lead_stages.find(x=>x.id===l.stage); return !(st&&(st.isWon||st.isLost)); }).length;
-        if(it.id==='clientes') count = S.clients.length;
-        if(it.id==='projetos') count = S.projects.filter(p=>p.status!=='concluido').length;
-        if(it.id==='obras') count = S.sites.filter(s=>s.status!=='concluida').length;
-        if(it.id==='pendencias') count = S.issues.filter(i=>i.status!=='concluido').length;
-        if(it.id==='notificacoes') count = computeNotifications().filter(n=>!isNotifRead(n.id)).length;
-        return `<div class="nav-item ${S.view===it.id?'active':''}" data-act="setView" data-args='${JSON.stringify([it.id])}'>
-          ${ICONS[it.icon]}<span>${it.label}</span>
-          ${!built ? '<span class="soon-badge">em breve</span>' : (count!==''? `<span class="count">${count}</span>` : '')}
-        </div>`;
-      }).join('')}
+      <div class="nav-group-label">FAVORITOS</div>
+      ${favItems.length? favItems.map(renderNavItem).join('') : '<p class="nav-empty-hint">Você ainda não adicionou favoritos.</p>'}
+    </div>`;
+  return favBlock + NAV.map(g=>{
+    const isCollapsed = !!collapsed[g.group];
+    return `
+    <div class="nav-group">
+      <div class="nav-group-label nav-group-label-toggle" data-act="toggleNavGroup" data-args='${JSON.stringify([g.group])}'>
+        <span>${g.group.toUpperCase()}</span><span class="nav-collapse-caret">${isCollapsed?'›':'˅'}</span>
+      </div>
+      ${isCollapsed? '' : g.items.map(renderNavItem).join('')}
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function handleGlobalSearch(q){
@@ -2672,13 +2767,15 @@ function renderDashboard(){
   }
   function prioritySection(tier){
     const items = tiered[tier];
+    if(!items.length) return '';
     const t = PRIORITY_TIERS[tier];
-    return `<div class="section-block card">
+    return `<div class="section-block card" style="margin-bottom:10px;">
       <div class="card-pad" style="padding-bottom:10px;"><h3 class="section-title">${t.dot} Prioridade ${t.label} — ${items.length}</h3></div>
-      ${items.length? items.slice(0,8).map(taskRow).join('') : `<div class="empty" style="padding:20px 20px;">${ICONS.check}<p style="margin:0;">Nada por aqui.</p></div>`}
+      ${items.slice(0,8).map(taskRow).join('')}
       ${items.length>8? `<div class="card-pad" style="padding-top:8px;"><span class="link-btn" data-act="setView" data-args='${JSON.stringify(['tarefas'])}'>Ver todas as ${items.length}</span></div>` : ''}
     </div>`;
   }
+  const anyPending = tiered.alta.length || tiered.media.length || tiered.baixa.length;
 
   return `
     <div class="page-head">
@@ -2689,10 +2786,14 @@ function renderDashboard(){
       </div>
     </div>
 
-    ${prioritySection('alta')}
-    ${prioritySection('media')}
-    ${prioritySection('baixa')}
+    <div class="dash-group">
+      <h2 class="dash-group-title">O que precisa de atenção</h2>
+      ${anyPending? `${prioritySection('alta')}${prioritySection('media')}${prioritySection('baixa')}`
+        : `<div class="card card-pad" style="text-align:center;color:var(--ink-faint);padding:28px 20px;">${ICONS.check}<p style="margin:8px 0 0;">Tudo em dia — nenhuma tarefa pendente.</p></div>`}
+    </div>
 
+    <div class="dash-group">
+      <h2 class="dash-group-title">Visão geral</h2>
     <div class="card card-pad section-block">
       <div class="section-head"><h3 class="section-title">Projetos em andamento</h3><span class="link-btn" data-act="setView" data-args='${JSON.stringify(['projetos'])}'>Ver todos</span></div>
       ${activeProjects.length? activeProjects.slice(0,6).map(p=>`
@@ -2754,6 +2855,7 @@ function renderDashboard(){
         `).join('') || '<p class="mini-tag">Nenhuma obra ativa.</p>'}
       </div>
     </div>` : ''}
+    </div>
   `;
 }
 
@@ -3277,11 +3379,26 @@ function renderStagePhotosTab(s){
 function renderStageFilesTab(s){
   const sfiles = S.stage_files.filter(f=>f.stageId===s.id);
   return `
-    <button class="btn btn-primary btn-sm" data-act="openStageFileForm" data-args='${JSON.stringify([s.id])}'>${ICONS.plus} Adicionar arquivo</button>
+    <button class="btn btn-primary btn-sm" data-act="triggerStageFileInput" data-args='${JSON.stringify([s.id])}'>${ICONS.plus} Adicionar arquivo</button>
     <div class="card" style="margin-top:14px;">
-      ${sfiles.length? sfiles.map(f=>`<div class="file-row" style="padding:12px 16px;"><span>📎 ${escapeHtml(f.name)} <span class="mini-tag">${escapeHtml(f.type||'')} · ${escapeHtml(f.version||'v1')}</span></span><button class="btn btn-sm btn-ghost" data-act="confirmDeleteEntity" data-args='${JSON.stringify(['stage_files', f.id, 'arquivo'])}'>${ICONS.trash}</button></div>`).join('') : `<div class="empty" style="padding:40px 20px;">${ICONS.archive}<div class="empty-title">Nenhum arquivo ainda</div></div>`}
+      ${sfiles.length? sfiles.map(f=>`<div class="file-row" style="padding:12px 16px;">
+          <span>📎 ${escapeHtml(f.name)} <span class="mini-tag">${escapeHtml(f.type||'')} · ${escapeHtml(f.version||'v1')}${f.fileSize? ' · '+fmtFileSize(f.fileSize) : ''}</span></span>
+          <div style="display:flex;gap:4px;">
+            ${f.storagePath? `<button class="btn btn-sm btn-ghost" data-act="openStageFileUrl" data-args='${JSON.stringify([f.id])}'>Abrir</button>` : ''}
+            <button class="btn btn-sm btn-ghost" data-act="confirmDeleteStageFile" data-args='${JSON.stringify([f.id])}'>${ICONS.trash}</button>
+          </div>
+        </div>`).join('') : `<div class="empty" style="padding:40px 20px;">${ICONS.archive}<div class="empty-title">Nenhum arquivo ainda</div></div>`}
     </div>
   `;
+}
+function confirmDeleteStageFile(id){
+  showConfirmModal({
+    title: 'Excluir arquivo',
+    message: 'Excluir este arquivo? Essa ação não pode ser desfeita.',
+    confirmLabel: 'Excluir',
+    danger: true,
+    onConfirm: () => deleteStageFile(id),
+  });
 }
 function renderStageHistoryTab(s, p){
   const related = S.activity.filter(a=>a.text.includes(s.name)).slice(0,30);
@@ -3447,6 +3564,16 @@ function renderTarefas(){
       return haystack.includes(q);
     });
   }
+  // Tarefas concluídas NUNCA são apagadas — continuam no banco, só ficam
+  // separadas visualmente numa seção própria, recolhida por padrão, em vez
+  // de aparecer misturada com as pendentes. Se a pessoa filtrar por status
+  // "Concluído" explicitamente, respeitamos essa escolha e não duplicamos.
+  const statusFilterIsCompleted = S.taskFilters.status==='concluido';
+  let completedList = [];
+  if(!statusFilterIsCompleted){
+    completedList = applySorting('tarefas', list.filter(t=>t.rawStatus==='concluido'));
+    list = list.filter(t=>t.rawStatus!=='concluido');
+  }
   list = applySorting('tarefas', list);
 
   const viewMode = S.taskViewMode;
@@ -3487,8 +3614,32 @@ function renderTarefas(){
       ${viewMode==='list'? renderSortControl('tarefas') : ''}
     </div>
     ${viewMode==='kanban'? renderTarefasKanban(list) : renderTarefasList(list)}
+    ${(viewMode==='list' && !statusFilterIsCompleted)? renderCompletedTasksSection(completedList) : ''}
   `;
 }
+function renderCompletedTasksSection(completedList){
+  const open = !!S.tasksCompletedExpanded;
+  return `<div class="card" style="margin-top:14px;">
+    <div class="card-pad" style="padding:14px 20px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;" data-act="toggleCompletedTasksSection">
+      <h3 class="section-title" style="margin:0;color:var(--ink-faint);">Concluídas — ${completedList.length}</h3>
+      <span class="mini-tag">${open?'˅':'›'}</span>
+    </div>
+    ${open? (completedList.length? `<div class="table-wrap"><table>
+        <thead><tr><th>Item</th><th>Projeto</th><th>Prazo</th><th>Status</th></tr></thead>
+        <tbody>
+          ${completedList.map(t=>`<tr data-act="openDrawer" data-args='${JSON.stringify(['task', t.id])}' style="opacity:.65;">
+            <td><div class="cell-primary" style="text-decoration:line-through;">${escapeHtml(t.title)}</div></td>
+            <td>${escapeHtml(taskContextLabel(t))}</td>
+            <td>${t.dueDate? fmtDate(t.dueDate) : '<span class="mini-tag">Sem prazo</span>'}</td>
+            <td><select class="filter-select" style="padding:4px 8px;font-size:12px;" data-stop="1" data-change-act="updateTaskStatus" data-args='${JSON.stringify([t.id])}'>
+                  ${Object.entries(TASK_STATUS).map(([k,v])=>`<option value="${k}" ${k==='concluido'?'selected':''}>${v.label}</option>`).join('')}
+                </select></td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>` : `<p class="mini-tag" style="padding:0 20px 16px;">Nenhuma tarefa concluída ainda.</p>`) : ''}
+  </div>`;
+}
+function toggleCompletedTasksSection(){ S.tasksCompletedExpanded = !S.tasksCompletedExpanded; rerenderCurrentView(); }
 function renderTarefasList(list){
   return `<div class="card">
       ${list.length? `<div class="table-wrap"><table>
@@ -3766,8 +3917,8 @@ function renderArquivos(){
   list.forEach(f=>{ const key = f.clientId||'sem_cliente'; (grouped[key]=grouped[key]||[]).push(f); });
   return `
     <div class="page-head">
-      <div><div class="page-eyebrow">Arquivos</div><h1 class="page-title serif">Biblioteca</h1><p class="page-sub">Documentos organizados por cliente e projeto. Upload de arquivos reais chega com a integração de armazenamento.</p></div>
-      <div class="page-actions"><button class="btn btn-primary" data-act="openFileForm">${ICONS.plus} Novo registro</button></div>
+      <div><div class="page-eyebrow">Arquivos</div><h1 class="page-title serif">Biblioteca</h1><p class="page-sub">Documentos organizados por cliente e projeto.</p></div>
+      <div class="page-actions"><button class="btn btn-primary" data-act="openFileForm">${ICONS.plus} Novo arquivo</button></div>
     </div>
     <div class="toolbar">
       <select class="filter-select" data-change-act="setFileClientFilter">
@@ -3783,17 +3934,29 @@ function renderArquivos(){
           <thead><tr><th>Arquivo</th><th>Projeto</th><th>Categoria</th><th>Tipo</th><th></th></tr></thead>
           <tbody>
             ${files.map(f=>`<tr>
-              <td class="cell-primary">${ICONS.file.replace('width="24" height="24"','width="13" height="13"')} ${escapeHtml(f.name)}</td>
+              <td class="cell-primary">${ICONS.file.replace('width="24" height="24"','width="13" height="13"')} ${escapeHtml(f.name)}${f.fileSize? ` <span class="mini-tag">${fmtFileSize(f.fileSize)}</span>` : ''}</td>
               <td>${escapeHtml(projectName(f.projectId))}</td>
               <td><span class="pill">${escapeHtml(f.category||'—')}</span></td>
               <td class="mini-tag">${escapeHtml(f.type||'')}</td>
-              <td style="text-align:right;"><button class="btn btn-sm btn-ghost" data-act="confirmDeleteEntity" data-args='${JSON.stringify(['files', f.id, 'arquivo'])}'>${ICONS.trash}</button></td>
+              <td style="text-align:right;white-space:nowrap;">
+                ${f.storagePath? `<button class="btn btn-sm btn-ghost" data-act="openGeneralFileUrl" data-args='${JSON.stringify([f.id])}'>Abrir</button>` : ''}
+                <button class="btn btn-sm btn-ghost" data-act="confirmDeleteGeneralFile" data-args='${JSON.stringify([f.id])}'>${ICONS.trash}</button>
+              </td>
             </tr>`).join('')}
           </tbody>
         </table></div>
       </div>
-    `).join('') : `<div class="card"><div class="empty" style="padding:60px 20px;">${ICONS.archive}<div class="empty-title">Nenhum arquivo registrado</div><p>Adicione o primeiro registro de documento.</p></div></div>`}
+    `).join('') : `<div class="card"><div class="empty" style="padding:60px 20px;">${ICONS.archive}<div class="empty-title">Nenhum arquivo registrado</div><p>Adicione o primeiro documento.</p></div></div>`}
   `;
+}
+function confirmDeleteGeneralFile(id){
+  showConfirmModal({
+    title: 'Excluir arquivo',
+    message: 'Excluir este arquivo? Essa ação não pode ser desfeita.',
+    confirmLabel: 'Excluir',
+    danger: true,
+    onConfirm: () => deleteGeneralFile(id),
+  });
 }
 
 /* ================= FINANCEIRO ================= */
@@ -4104,8 +4267,10 @@ const EVENT_TYPES = {
 };
 function agendaItemsForDate(dateStr){
   const items = [];
-  S.events.filter(e=>e.date===dateStr).forEach(e=>items.push({kind:'event', time:e.time||'', title:e.title, sub:EVENT_TYPES[e.type]?.label||e.type, color:EVENT_TYPES[e.type]?.color||'var(--ink-faint)', ref:e}));
-  S.tasks.filter(t=>t.dueDate===dateStr && t.status!=='concluido').forEach(t=>items.push({kind:'task', time:'', title:t.title, sub:'Prazo de tarefa · '+projectName(t.projectId), color:'var(--info)', ref:t}));
+  S.events.filter(e=>e.date===dateStr).forEach(e=>items.push({kind:'event', time:e.time||'', title:e.title, sub:EVENT_TYPES[e.type]?.label||e.type, color:EVENT_TYPES[e.type]?.color||'var(--ink-faint)', ref:e, done:e.status==='concluido'}));
+  // Tarefas concluídas continuam aparecendo na agenda (nunca somem) — só
+  // ficam visualmente discretas (riscadas), tratadas na renderização abaixo.
+  S.tasks.filter(t=>t.dueDate===dateStr).forEach(t=>items.push({kind:'task', time:'', title:t.title, sub:'Prazo de tarefa · '+projectName(t.projectId), color:'var(--info)', ref:t, done:t.status==='concluido'}));
   S.projects.filter(p=>p.dueDate===dateStr).forEach(p=>items.push({kind:'project', time:'', title:'Entrega: '+p.name, sub:'Projeto', color:'var(--accent)', ref:p}));
   S.transactions.filter(t=>t.dueDate===dateStr).forEach(t=>items.push({kind:'txn', time:'', title:(t.type==='receita'?'Recebimento: ':'Pagamento: ')+t.description, sub:fmtMoney(t.value), color:t.type==='receita'?'var(--success)':'var(--danger)', ref:t}));
   S.sites.filter(s=>s.dueDate===dateStr).forEach(s=>items.push({kind:'site', time:'', title:'Previsão de término: '+s.name, sub:'Obra', color:'var(--warning)', ref:s}));
@@ -4166,8 +4331,8 @@ function renderAgenda(){
       <div class="card card-pad">
         <div class="section-head"><h3 class="section-title">${fmtDateLong(selected)}</h3></div>
         ${selItems.length? selItems.map(it=>`
-          <div class="stat-row" style="cursor:pointer;align-items:flex-start;padding:10px 0;" data-act="openAgendaItemDrawer" data-args='${JSON.stringify([it.kind, it.ref.id])}'>
-            <span><span class="cal-dot" style="background:${it.color};display:inline-block;margin-right:8px;"></span>${it.time? it.time+' · ':''}${escapeHtml(it.title)}<div class="mini-tag" style="margin-left:16px;">${escapeHtml(it.sub)}</div></span>
+          <div class="stat-row" style="cursor:pointer;align-items:flex-start;padding:10px 0;${it.done?'opacity:.55;':''}" data-act="openAgendaItemDrawer" data-args='${JSON.stringify([it.kind, it.ref.id])}'>
+            <span><span class="cal-dot" style="background:${it.color};display:inline-block;margin-right:8px;"></span><span style="${it.done?'text-decoration:line-through;':''}">${it.time? it.time+' · ':''}${escapeHtml(it.title)}</span><div class="mini-tag" style="margin-left:16px;">${escapeHtml(it.sub)}</div></span>
           </div>
         `).join('') : `<p class="mini-tag">Nada agendado neste dia.</p>`}
       </div>
@@ -4176,13 +4341,15 @@ function renderAgenda(){
 }
 function drawerEvent(id){
   const e = S.events.find(x=>x.id===id); if(!e) return '';
+  const done = e.status==='concluido';
   return `<div class="drawer">
     <div class="drawer-head">
-      <div><div class="page-eyebrow">${EVENT_TYPES[e.type]?.label||e.type}</div><h3 class="serif" style="margin:2px 0 0;font-size:19px;">${escapeHtml(e.title)}</h3></div>
+      <div><div class="page-eyebrow">${EVENT_TYPES[e.type]?.label||e.type}</div><h3 class="serif" style="margin:2px 0 0;font-size:19px;${done?'text-decoration:line-through;color:var(--ink-faint);':''}">${escapeHtml(e.title)}</h3></div>
       <div style="display:flex;gap:6px;"><button class="btn btn-sm btn-ghost" data-act="openEventForm" data-args='${JSON.stringify([id])}'>${ICONS.edit}</button><button class="icon-btn" data-act="closeDrawer">${ICONS.x}</button></div>
     </div>
     <div class="drawer-body">
-      <div class="dr-row"><div class="dr-field"><div class="dr-label">DATA</div><div class="dr-value">${fmtDateLong(e.date)}</div></div>
+      <button class="btn btn-sm ${done?'':'btn-primary'}" data-act="toggleEventStatus" data-args='${JSON.stringify([id])}'>${done? '↺ Marcar como pendente' : '✓ Marcar como concluído'}</button>
+      <div class="dr-row" style="margin-top:16px;"><div class="dr-field"><div class="dr-label">DATA</div><div class="dr-value">${fmtDateLong(e.date)}</div></div>
       <div class="dr-field"><div class="dr-label">HORÁRIO</div><div class="dr-value">${escapeHtml(e.time||'—')}</div></div></div>
       ${e.clientId? `<div class="dr-field"><div class="dr-label">CLIENTE</div><div class="dr-value" style="cursor:pointer;color:var(--accent);" data-act="openDrawer" data-args='${JSON.stringify(['client', e.clientId])}'>${escapeHtml(clientName(e.clientId))}</div></div>`:''}
       ${e.projectId? `<div class="dr-field"><div class="dr-label">PROJETO</div><div class="dr-value" style="cursor:pointer;color:var(--accent);" data-act="openProjectWorkspace" data-args='${JSON.stringify([e.projectId])}'>${escapeHtml(projectName(e.projectId))}</div></div>`:''}
@@ -4190,6 +4357,13 @@ function drawerEvent(id){
       <div style="margin-top:24px;"><button class="btn btn-danger-text btn-sm" data-act="confirmDeleteEntity" data-args='${JSON.stringify(['events', id, 'evento'])}'>${ICONS.trash} Excluir evento</button></div>
     </div>
   </div>`;
+}
+async function toggleEventStatus(id){
+  const e = S.events.find(x=>x.id===id); if(!e) return;
+  const newStatus = e.status==='concluido'? 'pendente' : 'concluido';
+  await dbSet('events', id, {status:newStatus});
+  toast(newStatus==='concluido'? 'Evento marcado como concluído.' : 'Evento reaberto como pendente.');
+  if(!S.dbAvailable) render();
 }
 function drawerChecklistItem(id){
   const c = S.checklist_items.find(x=>x.id===id); if(!c) return '';
@@ -4426,24 +4600,123 @@ async function savePhotoDescription(id){
   await dbSet('stage_photos', id, {description: el.value});
   toast('Descrição salva.');
 }
+const STORAGE_BUCKET = 'files';
+function guessFileTypeLabel(file){
+  const ext = (file.name.split('.').pop()||'').toUpperCase();
+  return ext || (file.type? file.type.split('/')[1].toUpperCase() : 'ARQUIVO');
+}
+function isBucketMissingError(error){
+  const msg = (error && error.message || '').toLowerCase();
+  return msg.includes('bucket not found') || msg.includes('bucket_not_found') || (error && error.statusCode==='404' && msg.includes('bucket'));
+}
+function storageErrorMessage(error){
+  if(isBucketMissingError(error)) return `Bucket "${STORAGE_BUCKET}" não encontrado. Crie o bucket privado "${STORAGE_BUCKET}" no Supabase Storage.`;
+  // Nunca mascara com mensagem genérica — mostra a mensagem real do Supabase.
+  return (error && error.message) ? `Falha ao enviar o arquivo: ${error.message}` : 'Falha ao enviar o arquivo.';
+}
+// Caminho organizado por usuário — <auth.uid()>/<uuid>-<nome-do-arquivo> —
+// usado por todo lugar que envia arquivo real ao bucket "files".
+async function uploadFileToStorageBucket(file){
+  const client = getSupabaseClient();
+  if(!client) throw new Error('Supabase não está configurado.');
+  const ownerId = await getCurrentOwnerId();
+  const path = `${ownerId}/${uid('f')}-${file.name}`;
+  const { error } = await client.storage.from(STORAGE_BUCKET).upload(path, file);
+  if(error) throw error;
+  return path;
+}
+async function removeFromStorageBucket(path){
+  const client = getSupabaseClient();
+  if(!client || !path) return;
+  try{ await client.storage.from(STORAGE_BUCKET).remove([path]); }
+  catch(e){ console.warn('[Storage] Falha ao remover arquivo do Storage:', e); }
+}
+async function openSignedFileUrl(storagePath){
+  if(!storagePath){ toast('Este arquivo foi cadastrado só como registro (sem upload real) — nada para abrir.'); return; }
+  const client = getSupabaseClient();
+  if(!client){ toast('Supabase não está configurado.'); return; }
+  try{
+    const { data, error } = await client.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 60);
+    if(error) throw error;
+    window.open(data.signedUrl, '_blank');
+  }catch(e){
+    console.error('[Storage] Falha ao gerar link do arquivo:', e);
+    toast(storageErrorMessage(e));
+  }
+}
+
 function openStageFileForm(stageId){
-  showModal(`
-    <div class="overlay" data-act="closeModal" data-self-only="1">
-      <div class="modal">
-        <div class="modal-head"><h3>Novo arquivo da etapa</h3><button class="icon-btn" data-act="closeModal">${ICONS.x}</button></div>
-        <div class="modal-body">
-          <div class="form-grid">
-            <div class="form-field full"><label>Nome do arquivo</label><input id="f_name" placeholder="Ex: Layout_v01.pdf"></div>
-            <div class="form-field"><label>Tipo</label><select id="f_type">${['PDF','DOCX','XLSX','JPG','PNG','DWG','RVT','SKP'].map(t=>`<option>${t}</option>`).join('')}</select></div>
-            <div class="form-field"><label>Versão</label><input id="f_version" value="v1"></div>
-          </div>
-        </div>
-        <div class="modal-foot"><span></span>
-          <div style="display:flex;gap:8px;"><button class="btn" data-act="closeModal">Cancelar</button><button class="btn btn-primary" data-act="saveStageFile" data-args='${JSON.stringify([stageId])}'>Salvar</button></div>
-        </div>
-      </div>
-    </div>
-  `);
+  triggerStageFileInput(stageId);
+}
+function triggerStageFileInput(stageId){
+  let el = document.getElementById('stageFileInput_'+stageId);
+  if(!el){
+    el = document.createElement('input');
+    el.type = 'file'; el.id = 'stageFileInput_'+stageId; el.style.display='none';
+    el.setAttribute('data-change-act','handleStageFilesSelected');
+    el.setAttribute('data-args', JSON.stringify([stageId]));
+    document.body.appendChild(el);
+  }
+  el.click();
+}
+async function handleStageFilesSelected(stageId, files){
+  if(!files || !files.length) return;
+  const stage = S.stages.find(s=>s.id===stageId);
+  const projectId = stage? stage.projectId : null;
+  if(S.dataBackend!=='supabase'){
+    // Sem Supabase real (modo local/teste): mantém o comportamento anterior,
+    // só o catálogo de metadados — não existe Storage equivalente no modo Claude.
+    for(const file of Array.from(files)){
+      await dbAdd('stage_files', { stageId, projectId, name:file.name, type:guessFileTypeLabel(file), version:'v1', date: todayISO(), fileSize:file.size });
+    }
+    toast('Arquivo registrado (modo local — sem upload real).');
+    if(!S.dbAvailable) render();
+    return;
+  }
+  let added = 0;
+  for(const file of Array.from(files)){
+    let uploadedPath = null;
+    try{
+      uploadedPath = await uploadFileToStorageBucket(file);
+      // Só cria o registro DEPOIS do upload ter sucesso — nunca um registro órfão.
+      try{
+        await dbAdd('stage_files', {
+          stageId, projectId, name:file.name, type:guessFileTypeLabel(file), version:'v1', date: todayISO(),
+          fileSize:file.size, storagePath:uploadedPath,
+        });
+        added++;
+      }catch(dbErr){
+        // O upload foi bem-sucedido mas o registro no banco falhou — remove o
+        // arquivo recém-enviado do Storage para não deixar lixo órfão lá.
+        await removeFromStorageBucket(uploadedPath);
+        throw dbErr;
+      }
+    }catch(e){
+      console.error('[Storage] Falha ao enviar arquivo:', e);
+      toast(storageErrorMessage(e));
+    }
+  }
+  if(added){
+    await logActivity(`${added>1? added+' arquivos adicionados' : 'Arquivo adicionado'}${stage? ' — '+stage.name : ''}.`, 'file');
+    toast(added>1? `${added} arquivos enviados.` : 'Arquivo enviado.');
+  }
+}
+async function openStageFileUrl(fileId){
+  const f = S.stage_files.find(x=>x.id===fileId); if(!f) return;
+  await openSignedFileUrl(f.storagePath);
+}
+async function deleteStageFile(id){
+  const f = S.stage_files.find(x=>x.id===id);
+  if(f && f.storagePath && S.dataBackend==='supabase') await removeFromStorageBucket(f.storagePath);
+  await dbDelete('stage_files', id);
+  closeDrawer();
+  toast('Arquivo excluído.');
+}
+function fmtFileSize(bytes){
+  if(!bytes) return '';
+  if(bytes<1024) return bytes+' B';
+  if(bytes<1024*1024) return (bytes/1024).toFixed(0)+' KB';
+  return (bytes/1024/1024).toFixed(1)+' MB';
 }
 async function saveStageFile(stageId){
   const name = val('f_name');
@@ -4479,6 +4752,7 @@ function openEventForm(id, presetDate, presetProjectId){
 }
 async function saveEvent(id){
   const data = { title: val('f_title'), type: val('f_type'), date: val('f_date')||null, time: val('f_time')||null, clientId: val('f_client')||null, projectId: val('f_project')||null, notes: val('f_notes') };
+  if(!id) data.status = 'pendente'; // eventos concluídos nunca são apagados — status próprio, como tarefas
   if(!data.title){ toast('Informe o título do evento.'); return; }
   if(id){ await dbSet('events', id, data); await logActivity(`Evento "${data.title}" atualizado.`,'agenda'); }
   else { await dbAdd('events', data); await logActivity(`Novo evento na agenda: ${data.title}.`,'agenda'); }
@@ -5938,29 +6212,76 @@ function openFileForm(){
   showModal(`
     <div class="overlay" data-act="closeModal" data-self-only="1">
       <div class="modal">
-        <div class="modal-head"><h3>Novo registro de arquivo</h3><button class="icon-btn" data-act="closeModal">${ICONS.x}</button></div>
+        <div class="modal-head"><h3>Novo arquivo</h3><button class="icon-btn" data-act="closeModal">${ICONS.x}</button></div>
         <div class="modal-body">
-          <p class="mini-tag" style="margin-top:0;">Registra a referência do documento na biblioteca. O upload real do arquivo chega com a integração de armazenamento (Google Drive).</p>
+          <p class="mini-tag" style="margin-top:0;">Escolha cliente/projeto/categoria (opcional) e depois selecione o arquivo do computador.</p>
           <div class="form-grid">
-            <div class="form-field full"><label>Nome do arquivo</label><input id="f_name" placeholder="Ex: Contrato assinado.pdf"></div>
             <div class="form-field"><label>Cliente</label><select id="f_client"><option value="">Selecione…</option>${S.clients.map(c=>`<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></div>
             <div class="form-field"><label>Projeto</label><select id="f_project"><option value="">Selecione…</option>${S.projects.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}</select></div>
-            <div class="form-field"><label>Categoria</label><input id="f_category" placeholder="Contrato, Briefing, Projeto…"></div>
-            <div class="form-field"><label>Tipo</label><select id="f_type">${['PDF','DOCX','XLSX','JPG','PNG','DWG','RVT','SKP'].map(t=>`<option>${t}</option>`).join('')}</select></div>
+            <div class="form-field full"><label>Categoria</label><input id="f_category" placeholder="Contrato, Briefing, Projeto…"></div>
           </div>
         </div>
         <div class="modal-foot"><span></span>
-          <div style="display:flex;gap:8px;"><button class="btn" data-act="closeModal">Cancelar</button><button class="btn btn-primary" data-act="saveFile">Salvar registro</button></div>
+          <div style="display:flex;gap:8px;"><button class="btn" data-act="closeModal">Cancelar</button><button class="btn btn-primary" data-act="triggerGeneralFileInput">${ICONS.plus} Escolher arquivo</button></div>
         </div>
       </div>
     </div>
   `);
 }
-async function saveFile(){
-  const data = { name: val('f_name'), clientId: val('f_client')||null, projectId: val('f_project')||null, category: val('f_category'), type: val('f_type') };
-  if(!data.name){ toast('Informe o nome do arquivo.'); return; }
-  await dbAdd('files', data); await logActivity(`Arquivo "${data.name}" adicionado.`,'file');
-  closeModal(); toast('Arquivo registrado.'); if(!S.dbAvailable) render();
+function triggerGeneralFileInput(){
+  let el = document.getElementById('generalFileInput');
+  if(!el){
+    el = document.createElement('input');
+    el.type = 'file'; el.id = 'generalFileInput'; el.style.display='none';
+    el.setAttribute('data-change-act','handleGeneralFilesSelected');
+    document.body.appendChild(el);
+  }
+  el.click();
+}
+async function handleGeneralFilesSelected(files){
+  if(!files || !files.length) return;
+  // Lê os campos do modal (se ainda aberto) antes de fechar.
+  const clientId = val('f_client')||null, projectId = val('f_project')||null, category = val('f_category')||'';
+  closeModal();
+  if(S.dataBackend!=='supabase'){
+    for(const file of Array.from(files)){
+      await dbAdd('files', { name:file.name, clientId, projectId, category, type:guessFileTypeLabel(file), fileSize:file.size });
+    }
+    toast('Arquivo registrado (modo local — sem upload real).');
+    if(!S.dbAvailable) render();
+    return;
+  }
+  let added = 0;
+  for(const file of Array.from(files)){
+    let uploadedPath = null;
+    try{
+      uploadedPath = await uploadFileToStorageBucket(file);
+      try{
+        await dbAdd('files', { name:file.name, clientId, projectId, category, type:guessFileTypeLabel(file), fileSize:file.size, storagePath:uploadedPath });
+        added++;
+      }catch(dbErr){
+        await removeFromStorageBucket(uploadedPath);
+        throw dbErr;
+      }
+    }catch(e){
+      console.error('[Storage] Falha ao enviar arquivo:', e);
+      toast(storageErrorMessage(e));
+    }
+  }
+  if(added){
+    await logActivity(`${added>1? added+' arquivos adicionados' : 'Arquivo adicionado'}.`, 'file');
+    toast(added>1? `${added} arquivos enviados.` : 'Arquivo enviado.');
+  }
+}
+async function openGeneralFileUrl(fileId){
+  const f = S.files.find(x=>x.id===fileId); if(!f) return;
+  await openSignedFileUrl(f.storagePath);
+}
+async function deleteGeneralFile(id){
+  const f = S.files.find(x=>x.id===id);
+  if(f && f.storagePath && S.dataBackend==='supabase') await removeFromStorageBucket(f.storagePath);
+  await dbDelete('files', id);
+  toast('Arquivo excluído.');
 }
 
 function openTxnForm(type, id, presetProjectId){
@@ -6066,7 +6387,7 @@ const ACTIONS = {
   openClientForm, saveClient, openLeadForm, saveLead, openProjectForm, saveProject,
   openTaskForm, saveTask, updateTaskStatus, confirmDeleteEntity,
   openSiteForm, saveSite, openIssueForm, saveIssue, openSupplierForm, saveSupplier,
-  openDiaryForm, saveDiary, openFileForm, saveFile,
+  openDiaryForm, saveDiary, openFileForm, triggerGeneralFileInput, openGeneralFileUrl, confirmDeleteGeneralFile,
   openTxnForm, saveTxn, updateTxnStatus,
   openEventForm, saveEvent,
   markNotifRead, markAllNotifsRead,
@@ -6087,6 +6408,8 @@ const ACTIONS = {
   openSiteTemplateForm, saveSiteTemplate, openTemplateSiteChecklistItemForm, saveTemplateSiteChecklistItem, moveTemplateSiteChecklistItem,
   toggleSortDir, setTaskViewMode, quickSetTaskPriority,
   submitLogin, logout,
+  toggleCompletedTasksSection, toggleEventStatus, toggleNavGroup, toggleFavoriteNavItem,
+  triggerStageFileInput, openStageFileUrl, confirmDeleteStageFile, deleteStageFile,
   runConfirmCallback, saveQuickDueDate, clearChecklistDueDate,
   openProjectWorkspace, setProjectWorkspaceTab, backToProjects, toggleProjectQuickMenu, wsQuickAction, saveProjectNotes,
   openStageInline, backToStagesList, setStageSubTab, goToAdjacentStage,
@@ -6099,6 +6422,7 @@ const CHANGE_ACTIONS = {
   changeTaskStatusAndClose, changeTxnStatusAndClose, updateTaskStatus,
   changeStageStatus, changeChecklistStatus, toggleChecklistCheckbox, changeChecklistStatusAndClose,
   handlePhotoFilesSelected, onActivityTypeChange, setProdFilter, toggleCustomRepeatInput, setSortBy,
+  handleStageFilesSelected, handleGeneralFilesSelected,
   setTaskProjectFilter, setTaskDueRangeFilter, quickUpdateTaskField,
 };
 const INPUT_ACTIONS = { setClientQuery, setSupplierQuery, updateProgressLabel, handleGlobalSearch, setTaskQuery };
@@ -6129,12 +6453,41 @@ document.addEventListener('change', function(e){
   if(typeof fn === 'function') fn(...readArgs(el, 'data-args'), value);
 });
 
+// Colar imagem (Ctrl+V / Cmd+V) direto na aba de Fotos de uma etapa — reusa
+// exatamente o mesmo caminho de uma foto escolhida pelo botão de arquivo
+// (handlePhotoFilesSelected), sem nenhuma lógica de armazenamento paralela.
+document.addEventListener('paste', function(e){
+  if(!(S.currentStageId && S.stageSubTab==='fotos')) return;
+  const items = e.clipboardData && e.clipboardData.items; if(!items) return;
+  const imageFiles = [];
+  for(const item of items){
+    if(item.kind==='file' && item.type && item.type.startsWith('image/')){
+      const file = item.getAsFile();
+      if(file) imageFiles.push(file);
+    }
+  }
+  if(!imageFiles.length) return; // nunca aceita texto colado como imagem
+  e.preventDefault();
+  toast(imageFiles.length>1? `${imageFiles.length} imagens coladas — processando…` : 'Imagem colada — processando…');
+  handlePhotoFilesSelected(S.currentStageId, imageFiles);
+});
+
 document.addEventListener('input', function(e){
   const el = e.target.closest('[data-input-act]');
   if(!el) return;
   const action = el.getAttribute('data-input-act');
   const fn = INPUT_ACTIONS[action];
   if(typeof fn === 'function') fn(el.value);
+});
+
+// Formulário de login: precisa ser um <form> de verdade, com submit real, para
+// o gerenciador de senhas do navegador oferecer salvar/preencher — mas sem
+// deixar o navegador de fato recarregar a página ao enviar.
+document.addEventListener('submit', function(e){
+  if(e.target && e.target.id==='loginFormEl'){
+    e.preventDefault();
+    submitLogin();
+  }
 });
 
 document.addEventListener('focus', function(e){
@@ -6185,6 +6538,11 @@ window.toSupabaseRow = toSupabaseRow; window.fromSupabaseRow = fromSupabaseRow;
 window.dbAddSupabase = dbAddSupabase; window.dbSetSupabase = dbSetSupabase; window.dbDeleteSupabase = dbDeleteSupabase;
 window.initSupabaseAuth = initSupabaseAuth; window.applySessionToState = applySessionToState;
 window.loadAllFromSupabase = loadAllFromSupabase;
+window.getFavorites = getFavorites; window.toggleFavoriteNavItem = toggleFavoriteNavItem; window.isFavoriteNavItem = isFavoriteNavItem;
+window.navCollapsedState = navCollapsedState; window.toggleNavGroup = toggleNavGroup;
+window.toggleCompletedTasksSection = toggleCompletedTasksSection; window.toggleEventStatus = toggleEventStatus;
+window.handleStageFilesSelected = handleStageFilesSelected; window.openStageFileUrl = openStageFileUrl;
+window.deleteStageFile = deleteStageFile; window.agendaItemsForDate = agendaItemsForDate;
 window.submitLogin = submitLogin; window.logout = logout;
 window.openProjectWorkspace = openProjectWorkspace; window.setProjectWorkspaceTab = setProjectWorkspaceTab; window.backToProjects = backToProjects;
 window.openStageInline = openStageInline; window.backToStagesList = backToStagesList; window.setStageSubTab = setStageSubTab; window.goToAdjacentStage = goToAdjacentStage;
@@ -6198,7 +6556,7 @@ window.openSiteForm = openSiteForm; window.saveSite = saveSite;
 window.openIssueForm = openIssueForm; window.saveIssue = saveIssue;
 window.openSupplierForm = openSupplierForm; window.saveSupplier = saveSupplier;
 window.openDiaryForm = openDiaryForm; window.saveDiary = saveDiary;
-window.openFileForm = openFileForm; window.saveFile = saveFile;
+window.openFileForm = openFileForm; window.deleteGeneralFile = deleteGeneralFile;
 window.openTxnForm = openTxnForm; window.saveTxn = saveTxn; window.updateTxnStatus = updateTxnStatus;
 window.openEventForm = openEventForm; window.saveEvent = saveEvent;
 window.markNotifRead = markNotifRead; window.markAllNotifsRead = markAllNotifsRead;
