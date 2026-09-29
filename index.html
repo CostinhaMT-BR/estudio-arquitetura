@@ -2430,9 +2430,9 @@ function render(){
       </div>
       <nav class="nav">${renderNav()}</nav>
       <div class="sidebar-foot">
-        <div class="avatar">VR</div>
+        <div class="avatar">VO</div>
         <div class="sidebar-foot-text">
-          <div class="name">Vanessa Ribeiro</div>
+          <div class="name">Vanessa Oliveira</div>
           <div class="role">${S.authenticated && S.currentUser? escapeHtml(S.currentUser.email) : 'Arquiteta · Administradora'}</div>
         </div>
         ${S.authenticated? `<button class="icon-btn" title="Sair" data-act="logout" style="margin-left:auto;">${ICONS.x}</button>` : ''}
@@ -2487,7 +2487,10 @@ function toggleNavGroup(group){
   const state = navCollapsedState();
   state[group] = !state[group];
   try{ localStorage.setItem('estudio:nav_collapsed', JSON.stringify(state)); }catch(e){}
-  rerenderCurrentView();
+  // rerenderCurrentView() só troca o conteúdo (.view) — o menu lateral fica
+  // fora dela, então recolher/expandir nunca aparecia até a próxima
+  // navegação real. render() completo redesenha a sidebar junto, no mesmo clique.
+  render();
 }
 function favoritesKey(){
   return 'estudio:favorites:' + (S.currentUserId || 'local');
@@ -2500,7 +2503,10 @@ function toggleFavoriteNavItem(id){
   let favs = getFavorites();
   favs = favs.includes(id) ? favs.filter(x=>x!==id) : [...favs, id];
   try{ localStorage.setItem(favoritesKey(), JSON.stringify(favs)); }catch(e){}
-  rerenderCurrentView();
+  // Mesmo motivo do toggleNavGroup: a estrela e a seção FAVORITOS vivem na
+  // sidebar, fora de .view — precisa de um render() completo para refletir
+  // no mesmo clique, sem depender de trocar de página.
+  render();
 }
 function navItemCount(it){
   if(it.id==='tarefas') return taskLikeItems().filter(t=>t.status!=='concluido').length;
@@ -3384,7 +3390,7 @@ function renderStageFilesTab(s){
       ${sfiles.length? sfiles.map(f=>`<div class="file-row" style="padding:12px 16px;">
           <span>📎 ${escapeHtml(f.name)} <span class="mini-tag">${escapeHtml(f.type||'')} · ${escapeHtml(f.version||'v1')}${f.fileSize? ' · '+fmtFileSize(f.fileSize) : ''}</span></span>
           <div style="display:flex;gap:4px;">
-            ${f.storagePath? `<button class="btn btn-sm btn-ghost" data-act="openStageFileUrl" data-args='${JSON.stringify([f.id])}'>Abrir</button>` : ''}
+            ${f.storagePath? `${isViewableFileType(f.type)? `<button class="btn btn-sm btn-ghost" data-act="openStageFileUrl" data-args='${JSON.stringify([f.id])}'>Visualizar</button>` : ''}<button class="btn btn-sm btn-ghost" data-act="downloadStageFile" data-args='${JSON.stringify([f.id])}'>Baixar</button>` : ''}
             <button class="btn btn-sm btn-ghost" data-act="confirmDeleteStageFile" data-args='${JSON.stringify([f.id])}'>${ICONS.trash}</button>
           </div>
         </div>`).join('') : `<div class="empty" style="padding:40px 20px;">${ICONS.archive}<div class="empty-title">Nenhum arquivo ainda</div></div>`}
@@ -3939,7 +3945,7 @@ function renderArquivos(){
               <td><span class="pill">${escapeHtml(f.category||'—')}</span></td>
               <td class="mini-tag">${escapeHtml(f.type||'')}</td>
               <td style="text-align:right;white-space:nowrap;">
-                ${f.storagePath? `<button class="btn btn-sm btn-ghost" data-act="openGeneralFileUrl" data-args='${JSON.stringify([f.id])}'>Abrir</button>` : ''}
+                ${f.storagePath? `${isViewableFileType(f.type)? `<button class="btn btn-sm btn-ghost" data-act="openGeneralFileUrl" data-args='${JSON.stringify([f.id])}'>Visualizar</button>` : ''}<button class="btn btn-sm btn-ghost" data-act="downloadGeneralFile" data-args='${JSON.stringify([f.id])}'>Baixar</button>` : ''}
                 <button class="btn btn-sm btn-ghost" data-act="confirmDeleteGeneralFile" data-args='${JSON.stringify([f.id])}'>${ICONS.trash}</button>
               </td>
             </tr>`).join('')}
@@ -4631,12 +4637,18 @@ async function removeFromStorageBucket(path){
   try{ await client.storage.from(STORAGE_BUCKET).remove([path]); }
   catch(e){ console.warn('[Storage] Falha ao remover arquivo do Storage:', e); }
 }
-async function openSignedFileUrl(storagePath){
+async function openSignedFileUrl(storagePath, downloadFilename){
   if(!storagePath){ toast('Este arquivo foi cadastrado só como registro (sem upload real) — nada para abrir.'); return; }
   const client = getSupabaseClient();
   if(!client){ toast('Supabase não está configurado.'); return; }
   try{
-    const { data, error } = await client.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 60);
+    // Sem downloadFilename: link "de visualização", o navegador decide como
+    // mostrar (imagem/PDF abrem inline). Com downloadFilename: o Storage
+    // devolve o link já marcado para forçar o download, preservando o nome
+    // original do arquivo (parâmetro nativo do Supabase — não precisa de
+    // nenhuma lógica extra nossa nem de mudança de política).
+    const opts = downloadFilename? {download:downloadFilename} : undefined;
+    const { data, error } = await client.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, 60, opts);
     if(error) throw error;
     window.open(data.signedUrl, '_blank');
   }catch(e){
@@ -4644,6 +4656,8 @@ async function openSignedFileUrl(storagePath){
     toast(storageErrorMessage(e));
   }
 }
+const VIEWABLE_FILE_TYPES = new Set(['JPG','JPEG','PNG','GIF','WEBP','SVG','PDF']);
+function isViewableFileType(type){ return VIEWABLE_FILE_TYPES.has((type||'').toUpperCase()); }
 
 function openStageFileForm(stageId){
   triggerStageFileInput(stageId);
@@ -4704,6 +4718,10 @@ async function handleStageFilesSelected(stageId, files){
 async function openStageFileUrl(fileId){
   const f = S.stage_files.find(x=>x.id===fileId); if(!f) return;
   await openSignedFileUrl(f.storagePath);
+}
+async function downloadStageFile(fileId){
+  const f = S.stage_files.find(x=>x.id===fileId); if(!f) return;
+  await openSignedFileUrl(f.storagePath, f.name);
 }
 async function deleteStageFile(id){
   const f = S.stage_files.find(x=>x.id===id);
@@ -6277,6 +6295,10 @@ async function openGeneralFileUrl(fileId){
   const f = S.files.find(x=>x.id===fileId); if(!f) return;
   await openSignedFileUrl(f.storagePath);
 }
+async function downloadGeneralFile(fileId){
+  const f = S.files.find(x=>x.id===fileId); if(!f) return;
+  await openSignedFileUrl(f.storagePath, f.name);
+}
 async function deleteGeneralFile(id){
   const f = S.files.find(x=>x.id===id);
   if(f && f.storagePath && S.dataBackend==='supabase') await removeFromStorageBucket(f.storagePath);
@@ -6387,7 +6409,7 @@ const ACTIONS = {
   openClientForm, saveClient, openLeadForm, saveLead, openProjectForm, saveProject,
   openTaskForm, saveTask, updateTaskStatus, confirmDeleteEntity,
   openSiteForm, saveSite, openIssueForm, saveIssue, openSupplierForm, saveSupplier,
-  openDiaryForm, saveDiary, openFileForm, triggerGeneralFileInput, openGeneralFileUrl, confirmDeleteGeneralFile,
+  openDiaryForm, saveDiary, openFileForm, triggerGeneralFileInput, openGeneralFileUrl, confirmDeleteGeneralFile, downloadGeneralFile,
   openTxnForm, saveTxn, updateTxnStatus,
   openEventForm, saveEvent,
   markNotifRead, markAllNotifsRead,
@@ -6409,7 +6431,7 @@ const ACTIONS = {
   toggleSortDir, setTaskViewMode, quickSetTaskPriority,
   submitLogin, logout,
   toggleCompletedTasksSection, toggleEventStatus, toggleNavGroup, toggleFavoriteNavItem,
-  triggerStageFileInput, openStageFileUrl, confirmDeleteStageFile, deleteStageFile,
+  triggerStageFileInput, openStageFileUrl, confirmDeleteStageFile, deleteStageFile, downloadStageFile,
   runConfirmCallback, saveQuickDueDate, clearChecklistDueDate,
   openProjectWorkspace, setProjectWorkspaceTab, backToProjects, toggleProjectQuickMenu, wsQuickAction, saveProjectNotes,
   openStageInline, backToStagesList, setStageSubTab, goToAdjacentStage,
